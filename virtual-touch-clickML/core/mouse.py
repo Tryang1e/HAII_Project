@@ -35,4 +35,3 @@ class VirtualMouse:
         if current_time - self.last_click_time > 0.5:
             pyautogui.click()
             self.last_click_time = current_time
-

@@ -95,8 +95,8 @@ class InteractionApp:
                 l_mid, l_thumb = user_left['middle'], user_left['thumb']
                 l_dist_zoom = ((l_mid[0] - l_thumb[0])**2 + (l_mid[1] - l_thumb[1])**2 + (l_mid[2] - l_thumb[2])**2)**0.5
                 
-                # 왼손만 주먹일 때는 회전
-                if self.detector.is_hand_fist('Left') and not self.detector.is_hand_fist('Right'):
+                # 왼손만 주먹일 때는 회전 (user_left가 get_hand_info('Right')이므로 is_hand_fist('Right') 사용)
+                if self.detector.is_hand_fist('Right') and not self.detector.is_hand_fist('Left'):
                     if self.prev_rot_pos is None: self.prev_rot_pos = (lx, ly)
                     dx, dy = lx - self.prev_rot_pos[0], ly - self.prev_rot_pos[1]
                     self.view_rot_y += dx * 5.0
