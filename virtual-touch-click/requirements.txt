@@ -1,5 +1,0 @@
-opencv-python
-mediapipe==0.10.9
-pyautogui
-numpy
-pyrealsense2

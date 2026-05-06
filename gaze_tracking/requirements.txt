@@ -1,7 +1,0 @@
-numpy
-opencv-contrib-python
-opencv-python
-onnxruntime
-scipy
-pyautogui
-pyrealsense2
