@@ -69,8 +69,8 @@ class InteractionApp:
             self.detector.process_hands(display_image)
             self.ui.draw_landmarks(display_image, self.detector, w_img, h_img)
 
-            user_right = self.detector.get_hand_info('Right')
-            user_left = self.detector.get_hand_info('Left')
+            user_left = self.detector.get_hand_info('Right')
+            user_right = self.detector.get_hand_info('Left')
 
             # --- [양손 주먹 제스처 초기화] ---
             if self.detector.is_hand_fist('Left') and self.detector.is_hand_fist('Right'):
