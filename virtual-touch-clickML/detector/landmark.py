@@ -23,6 +23,58 @@ class Detector:
         self.hand_results = self.hands.process(rgb)
         return self.hand_results.multi_hand_landmarks is not None
 
+    def get_hand_info(self, hand_label):
+        """
+        Returns info for a hand. 
+        hand_label: 'Left' or 'Right' (user's perspective)
+        """
+        # MediaPipe에서 이미지 반전 시 'Left' 레이블이 실제 오른손, 'Right'가 왼손인 경우가 많음
+        target_label = 'Right' if hand_label == 'Left' else 'Left'
+        
+        if self.hand_results and self.hand_results.multi_hand_landmarks:
+            for i, handedness in enumerate(self.hand_results.multi_handedness):
+                label = handedness.classification[0].label
+                # 레이블이 정확히 일치하거나, 인덱스로 비교 (0: Left, 1: Right 등 환경마다 다를 수 있음)
+                if label == target_label:
+                    landmarks = self.hand_results.multi_hand_landmarks[i].landmark
+                    
+                    # palm center
+                    palm_indices = [0, 5, 9, 13, 17]
+                    avg_x = float(sum(landmarks[idx].x for idx in palm_indices) / len(palm_indices))
+                    avg_y = float(sum(landmarks[idx].y for idx in palm_indices) / len(palm_indices))
+                    
+                    return {
+                        'pos': (avg_x, avg_y),
+                        'middle': (float(landmarks[12].x), float(landmarks[12].y), float(landmarks[12].z)),
+                        'thumb': (float(landmarks[4].x), float(landmarks[4].y), float(landmarks[4].z)),
+                        'index': (float(landmarks[8].x), float(landmarks[8].y), float(landmarks[8].z)),
+                        'landmarks': landmarks
+                    }
+        return None
+
+    def is_hand_fist(self, hand_label):
+        """Checks if the specified hand is a fist."""
+        target_label = 'Right' if hand_label == 'Left' else 'Left'
+        
+        if self.hand_results and self.hand_results.multi_hand_landmarks:
+            for i, handedness in enumerate(self.hand_results.multi_handedness):
+                if handedness.classification[0].label == target_label:
+                    landmarks = self.hand_results.multi_hand_landmarks[i].landmark
+                    
+                    # 주먹 판정: 손가락 끝(tip)이 손가락 뿌리(mcp)보다 손목(0)에 더 가까운지 확인
+                    tips = [8, 12, 16, 20]
+                    mcps = [5, 9, 13, 17]
+                    
+                    folded_count = 0
+                    for tip, mcp in zip(tips, mcps):
+                        dist_tip = ((landmarks[tip].x - landmarks[0].x)**2 + (landmarks[tip].y - landmarks[0].y)**2)**0.5
+                        dist_mcp = ((landmarks[mcp].x - landmarks[0].x)**2 + (landmarks[mcp].y - landmarks[0].y)**2)**0.5
+                        if dist_tip < dist_mcp:
+                            folded_count += 1
+                    
+                    return folded_count >= 3
+        return False
+
     # 사람 기준 왼손 (카메라 기준 Right 레이블)
     def get_left_hand_pos(self):
         """Returns the (x, y) coordinates of the hand palm centroid using wrist and MCP joints."""

@@ -49,7 +49,7 @@ class RealSenseCamera:
             self.pipeline.stop()
 
 class WebcamCamera:
-    def __init__(self, width=1280, height=720, fps=30, camera_index=0):
+    def __init__(self, width=640, height=480, fps=30, camera_index=0):
         self.width = width
         self.height = height
         self.fps = fps
@@ -57,39 +57,59 @@ class WebcamCamera:
         self.cap = None
 
     def start(self):
+        # 윈도우에서 가장 호환성이 높은 DSHOW 사용
         self.cap = cv2.VideoCapture(self.camera_index, cv2.CAP_DSHOW)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self.cap.set(cv2.CAP_PROP_FPS, self.fps)
+        
         if not self.cap.isOpened():
             raise RuntimeError(f"Failed to open Webcam index {self.camera_index}")
-        print("Webcam started successfully.")
+
+        # 해상도 설정
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1) # 버퍼 최소화로 지연 방지
+        
+        actual_w = self.cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+        actual_h = self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+        print(f"Webcam (Index {self.camera_index}) started at {actual_w}x{actual_h}.")
 
     def get_frame(self):
         if not self.cap or not self.cap.isOpened():
             return None
         ret, frame = self.cap.read()
-        if not ret:
-            return None
-        return frame
+        return frame if ret else None
 
     def stop(self):
         if self.cap:
             self.cap.release()
 
-def get_camera(width=1280, height=720, fps=30):
+def get_camera(width=1280, height=720, fps=30, camera_index=None):
     try:
         pipeline = rs.pipeline()
         config = rs.config()
         config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
         
-        # Try to start it directly to see if a device is connected
         profile = pipeline.start(config)
         print("RealSense device detected.")
         return RealSenseCamera(width=width, height=height, fps=fps, pipeline=pipeline, profile=profile)
-    except Exception as e:
-        print(f"RealSense check failed: {e}")
+    except Exception:
+        pass
     
-    print("RealSense not found, falling back to WebCam...")
-    return WebcamCamera(width=width, height=height, fps=fps)
+    print("RealSense not found, searching for available WebCam...")
+    
+    # 지정된 인덱스 확인
+    if camera_index is not None:
+        cap = cv2.VideoCapture(camera_index)
+        if cap.isOpened():
+            cap.release()
+            return WebcamCamera(width=width, height=height, fps=fps, camera_index=camera_index)
+
+    # 0번부터 순차 탐색 (CAP_DSHOW 없이)
+    for idx in [0, 1, 2]:
+        cap = cv2.VideoCapture(idx)
+        if cap.isOpened():
+            cap.release()
+            print(f"Webcam found at index: {idx}")
+            return WebcamCamera(width=width, height=height, fps=fps, camera_index=idx)
+    
+    return WebcamCamera(width=width, height=height, fps=fps, camera_index=0)
 
