@@ -50,6 +50,26 @@ class VirtualMouse:
         pyautogui.moveTo(mx, my, _pause=False)
         self.prev_mx, self.prev_my = mx, my
 
+    def move_in_window(self, hx, hy, win_rect):
+        wx, wy, ww, wh = win_rect
+        # 0~1 좌표계를 카메라 윈도우 내부의 절대 픽셀 좌표로 변환
+        raw_x = wx + hx * ww
+        raw_y = wy + hy * wh
+        
+        self.state_mean, self.state_cov = self.kf.filter_update(
+            self.state_mean, self.state_cov, np.array([raw_x, raw_y])
+        )
+        
+        mx = int(self.state_mean[0])
+        my = int(self.state_mean[1])
+        
+        # 화면 밖으로 넘어가지 않도록 방어 코드 (PyAutoGUI 튕김 방지)
+        mx = max(0, min(self.screen_w - 2, mx))
+        my = max(0, min(self.screen_h - 2, my))
+        
+        pyautogui.moveTo(mx, my, _pause=False)
+        self.prev_mx, self.prev_my = mx, my
+
     def click(self):
         current_time = time.time()
         # 0.5초 디바운스

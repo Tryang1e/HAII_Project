@@ -38,13 +38,16 @@ class InteractionApp:
         self.all_strokes = []  
         self.active_stroke = []
         self.undone_strokes = []
-        self.current_state = HandState.IDLE
+        self.left_state = HandState.IDLE
+        self.right_state = HandState.IDLE
         
         self.view_rot_x = 0  
         self.view_rot_y = 0  
         self.view_zoom = 1.0
         self.prev_rot_pos = None
         self.prev_zoom_y = None
+        self.is_2d_mode = False  # 2D 고정 모드 플래그
+        self.current_cursor_3d = None  # 미니맵에 표시할 현재 3D 커서 위치
 
         # --- [Kalman filter 기반 보정 관련] ---
         dt = 1.0
@@ -82,10 +85,17 @@ class InteractionApp:
         # --- [프레임 드랍 보정] ---
         self.right_hand_lost_frames = 0
         self.pinch_lost_frames = 0
+        self.rotation_lost_frames = 0
+        self.zoom_lost_frames = 0
+        self.smooth_lx, self.smooth_ly = None, None
 
         # --- [SVM Model Initialization] ---
-        self.svm = cv2.ml.SVM_load('virtual-touch-click/gesture_svm_model.xml')
-        with open('virtual-touch-click/gesture_labels.json', 'r') as f:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        svm_path = os.path.join(base_dir, 'virtual-touch-click', 'gesture_svm_model.xml')
+        labels_path = os.path.join(base_dir, 'virtual-touch-click', 'gesture_labels.json')
+        
+        self.svm = cv2.ml.SVM_load(svm_path)
+        with open(labels_path, 'r') as f:
             label_map_str = json.load(f)
             self.int_to_label = {int(k): v for k, v in label_map_str.items()}
         self.angle_history = deque(maxlen=20)
@@ -157,7 +167,13 @@ class InteractionApp:
             # 1. 사용자 왼손 (회전 및 줌)
             left_interacting = False
             if user_left:
-                lx, ly = user_left['pos']
+                raw_lx, raw_ly = user_left['pos']
+                if self.smooth_lx is None:
+                    self.smooth_lx, self.smooth_ly = raw_lx, raw_ly
+                else:
+                    self.smooth_lx = self.smooth_lx * 0.7 + raw_lx * 0.3
+                    self.smooth_ly = self.smooth_ly * 0.7 + raw_ly * 0.3
+                lx, ly = self.smooth_lx, self.smooth_ly
                 lm = user_left['landmarks']
                 
                 # X, Y, Z 3축 고려 유클리드 거리 계산 헬퍼 함수 (각도에 따른 왜곡 방지)
@@ -170,91 +186,111 @@ class InteractionApp:
                 # 손 크기(스케일)에 비례하는 동적 임계값 생성 (거리에 따른 오작동 방지)
                 palm_size = calc_dist(0, 9)
                 if palm_size < 0.01: palm_size = 0.01
-                pinch_th = palm_size * 0.35      # 핀치 시작 임계값 (너그럽던 것을 0.50 -> 0.35로 엄격하게 수정)
-                release_th = palm_size * 0.45    # 핀치 해제 임계값
-                clear_th = palm_size * 0.70      # 확실히 폈다고 인정할 임계값 (동작 꼬임 방지용)
+                pinch_th = palm_size * 0.55      # 핀치 시작 임계값 대폭 완화
+                release_th = palm_size * 0.70    # 핀치 해제 임계값 대폭 완화
+                clear_th = palm_size * 0.80      # 확실히 폈다고 인정할 임계값
                 
                 # 왼손 검지가 펴져 있는지 확실하게 판별 (Tip-Wrist 거리가 MCP-Wrist 거리의 1.3배 이상)
                 idx_extended = calc_dist(8, 0) > calc_dist(5, 0) * 1.3
                 mid_extended = calc_dist(12, 0) > calc_dist(9, 0) * 1.3
                 is_left_open = idx_extended and mid_extended
                 
-                # 손가락 접힘 판별
-                idx_tucked = calc_dist(8, 0) < calc_dist(5, 0) * 1.1
-                mid_tucked = calc_dist(12, 0) < calc_dist(9, 0) * 1.1
-                ring_tucked = calc_dist(16, 0) < calc_dist(13, 0) * 1.1
-                pinky_tucked = calc_dist(20, 0) < calc_dist(17, 0) * 1.1
+                # 손가락 접힘 판별 (완전한 꽉 쥔 주먹이 아니어도 인식되도록 1.1 -> 1.35로 매우 너그럽게 수정)
+                idx_tucked = calc_dist(8, 0) < calc_dist(5, 0) * 1.35
+                mid_tucked = calc_dist(12, 0) < calc_dist(9, 0) * 1.35
+                ring_tucked = calc_dist(16, 0) < calc_dist(13, 0) * 1.35
+                pinky_tucked = calc_dist(20, 0) < calc_dist(17, 0) * 1.35
                 
                 # 확실히 접힌 상태(완전한 주먹/포인팅 상태) 판별 (O모양 핀치와 구분하기 위함)
-                idx_tightly_tucked = calc_dist(8, 0) < calc_dist(5, 0) * 0.9
-                mid_tightly_tucked = calc_dist(12, 0) < calc_dist(9, 0) * 0.9
+                idx_tightly_tucked = calc_dist(8, 0) < calc_dist(5, 0) * 0.95
+                mid_tightly_tucked = calc_dist(12, 0) < calc_dist(9, 0) * 0.95
                 
-                # 주먹(Rotation) 판별: 꽉 쥐지 않고 '느슨한 주먹'만 쥐어도 인식되도록 임계값 대폭 완화 (0.95 -> 1.1)
-                is_left_fist = idx_tucked and mid_tucked and ring_tucked and pinky_tucked
+                # 주먹(Rotation) 판별: 새끼나 약지가 덜 접혀도 검지/중지만 확실히 접히면 인식되도록 완화
+                is_left_fist = idx_tucked and mid_tucked
                 both_fists = is_left_fist and is_right_fist
                 
                 # 주먹 잠금용 (손목 각도가 틀어져도 풀리지 않도록 매우 넉넉한 임계값 적용: 1.3 -> 1.6)
                 idx_lock_tucked = calc_dist(8, 0) < calc_dist(5, 0) * 1.6
                 mid_lock_tucked = calc_dist(12, 0) < calc_dist(9, 0) * 1.6
 
-                # 오른손이 드로잉 중일 때는 왼손이 뷰에 들어올 때 발생하는 초기 랜드마크 튐 현상(오입력)을 무시합니다.
                 # 양손이 모두 주먹일 때는 모든 동작 무시
-                can_left_interact = (self.current_state != HandState.DRAWING) and not both_fists
+                can_left_interact = not both_fists
 
                 # 손가락 관절 중 하나라도 카메라 시야의 극단적 가장자리(2% 이내)에 있으면 
                 # 화면 밖으로 나간 것으로 간주하여 MediaPipe의 환각(Hallucination) 핀치를 차단
                 is_idx_in_bounds = all((0.02 < lm[i].x < 0.98) and (0.02 < lm[i].y < 0.98) for i in [5, 6, 7, 8])
                 is_mid_in_bounds = all((0.02 < lm[i].x < 0.98) and (0.02 < lm[i].y < 0.98) for i in [9, 10, 11, 12])
 
-                # 확실한 핀치 형태인지 수학적으로 검증 (각도 왜곡 방지용: 끝마디 길이의 1.5배 이내)
-                is_ui_pinch_strict = is_idx_in_bounds and (dist_thumb_idx < pinch_th) and (dist_thumb_idx < calc_dist(8, 7) * 1.5)
-                is_zoom_pinch_strict = is_mid_in_bounds and (dist_thumb_mid < pinch_th) and (dist_thumb_mid < calc_dist(12, 11) * 1.5)
-
-                # zoom 동작: 엄지-중지 핀치 시 약지와 새끼손가락은 접혀 있어야 함
-                # 포인팅 상태(중지가 완전 접힘)에서 줌이 발동하는 것을 막기 위해 not mid_tightly_tucked 조건 추가
-                is_zoom_heuristic = is_zoom_pinch_strict and (dist_thumb_mid < dist_thumb_idx * 0.8) and ring_tucked and pinky_tucked and not mid_tightly_tucked
-                is_zoom_intent = can_left_interact and is_mid_in_bounds and not is_left_open and (dist_thumb_mid < dist_thumb_idx * 0.9) and (is_zoom_heuristic or (self.predicted_gesture == 'zoom' and dist_thumb_mid < palm_size * 0.8 and ring_tucked and pinky_tucked and not mid_tightly_tucked))
-                
-                # 화면 도구 선택(클릭): 엄지-검지 핀치 외 나머지 손가락은 접혀 있어야 함
-                # 주먹 상태(검지가 완전 접힘)에서 클릭이 발동하는 것을 막기 위해 not idx_tightly_tucked 조건 추가
-                is_ui_select_heuristic = is_ui_pinch_strict and (dist_thumb_idx < dist_thumb_mid * 0.8) and mid_tucked and ring_tucked and pinky_tucked and not idx_tightly_tucked
-                is_ui_select_intent = can_left_interact and is_idx_in_bounds and not is_left_open and (dist_thumb_idx < dist_thumb_mid * 0.9) and (is_ui_select_heuristic or (self.predicted_gesture == 'menu_select' and dist_thumb_idx < palm_size * 0.8 and mid_tucked and ring_tucked and pinky_tucked and not idx_tightly_tucked))
-
-                # rotation 동작: 확실한 핀치 상태가 아닐 때만 주먹으로 인정 (핀치 중 각도 변경으로 인한 오작동 완벽 차단)
-                is_rotation_heuristic = is_left_fist and not (is_ui_pinch_strict or is_zoom_pinch_strict)
-                is_rotation_intent = can_left_interact and not is_right_fist and not (is_ui_pinch_strict or is_zoom_pinch_strict) and (is_rotation_heuristic or (self.predicted_gesture == 'rotation' and idx_tucked and mid_tucked))
-                
-                # 포인터 이동: 기존 휴리스틱 기반
-                is_pointer_intent = can_left_interact and is_idx_in_bounds and idx_extended and mid_tucked and not is_rotation_heuristic
-                
                 # --- [동작 상태 잠금 (Hysteresis Lock) 및 우선순위 결정] ---
                 is_zoom = False
                 is_rotation = False
                 is_ui_select = False
                 is_pointer = False
                 
-                # 1순위: Rotation (주먹 상태가 가장 우선순위가 높으며, 다른 상태의 Lock을 무시하고 강제 진입/유지)
-                if is_rotation_intent or (self.prev_rot_pos is not None and idx_lock_tucked and mid_lock_tucked and not is_right_fist):
+                # [상호 배타적 제스처 판별 로직]
+                # 각 기능이 겹치지 않도록 검지와 중지의 '펴짐(Extended)' 상태를 기준으로 역할을 완벽히 분리합니다.
+                idx_ratio = calc_dist(8, 0) / calc_dist(5, 0)
+                mid_ratio = calc_dist(12, 0) / calc_dist(9, 0)
+                
+                idx_ext = idx_ratio > 1.2   # 검지 펴짐
+                mid_ext = mid_ratio > 1.2   # 중지 펴짐
+                idx_tight = idx_ratio < 0.95 # 검지 꽉 접힘
+                mid_tight = mid_ratio < 0.95 # 중지 꽉 접힘
+
+                # 1. ROTATION (주먹): 검지와 중지가 모두 접힘 (가장 직관적인 주먹 형태)
+                is_rotation_intent = can_left_interact and not is_right_fist and (not idx_ext) and (not mid_ext)
+                
+                # 2. CLICK (검지 핀치): 검지-엄지 핀치 (중지는 반드시 펴져 있어야 함 -> 주먹이나 Zoom과 절대 안 겹침)
+                is_ui_select_intent = can_left_interact and is_idx_in_bounds and (dist_thumb_idx < pinch_th) and mid_ext and not idx_tight
+                
+                # 3. ZOOM (중지 핀치): 중지-엄지 핀치 (검지는 반드시 펴져 있어야 함 -> 주먹이나 Click과 절대 안 겹침)
+                is_zoom_intent = can_left_interact and is_mid_in_bounds and (dist_thumb_mid < pinch_th) and idx_ext and not mid_tight
+                
+                # 4. POINTER (포인터): 검지만 펴지고 중지는 접힘 (Zoom 핀치가 아닐 때만 발동)
+                is_pointer_intent = can_left_interact and is_idx_in_bounds and idx_ext and (not mid_ext) and not is_zoom_intent
+                
+                # 1순위: Rotation 유지 및 진입
+                if is_rotation_intent or (self.prev_rot_pos is not None and (not idx_ext) and (not mid_ext) and not is_right_fist):
                     is_rotation = True
-                # 2순위: Zoom Lock (의식하고 풀어야 할 정도로 널널했던 임계값을 1.5배 -> 1.1배로 낮춤)
-                elif self.prev_zoom_y is not None and dist_thumb_mid < release_th * 1.1:
+                # 2순위: Zoom 유지 (해제 임계값까지)
+                elif self.prev_zoom_y is not None and dist_thumb_mid < release_th:
                     is_zoom = True
-                # 3순위: UI Select(Pinch) Lock (마찬가지로 1.5배 -> 1.1배로 낮춤)
-                elif self.current_state == HandState.MENU_SELECTION and dist_thumb_idx < release_th * 1.1:
+                # 3순위: Click 유지 (해제 임계값까지)
+                elif self.left_state == HandState.MENU_SELECTION and dist_thumb_idx < release_th:
                     is_ui_select = True
                 # 4순위: 현재 프레임의 의도 반영
                 else:
                     is_zoom = is_zoom_intent
                     is_ui_select = is_ui_select_intent
                     
+                # 2D 고정 모드일 때는 회전 기능만 차단 (줌은 유지/사용 가능)
+                if self.is_2d_mode:
+                    is_rotation = False
+                    self.prev_rot_pos = None
+                    
                 if not is_zoom and not is_rotation and not is_ui_select:
                     is_pointer = is_pointer_intent
                     
-                # 동작 종료 시 상태 변수 초기화 -> 다음 프레임에서 잠금이 오작동하지 않게 하기 위함
+                # 동작 락 보정 (프레임 드랍 대응)
+                if is_rotation:
+                    self.rotation_lost_frames = 0
+                elif self.prev_rot_pos is not None:
+                    self.rotation_lost_frames += 1
+                    if self.rotation_lost_frames < 4:
+                        is_rotation = True
+
+                if is_zoom:
+                    self.zoom_lost_frames = 0
+                elif self.prev_zoom_y is not None:
+                    self.zoom_lost_frames += 1
+                    if self.zoom_lost_frames < 4:
+                        is_zoom = True
+
+                # 동작 종료 시 상태 변수 초기화
                 if not is_zoom: self.prev_zoom_y = None
                 if not is_rotation: self.prev_rot_pos = None
-                if not is_ui_select and self.current_state == HandState.MENU_SELECTION:
-                    self.current_state = HandState.IDLE
+                if not is_ui_select and self.left_state == HandState.MENU_SELECTION:
+                    self.left_state = HandState.IDLE
                 
                 # 포인터 시각화 (왼손 검지)
                 pointer_lx, pointer_ly = int(lm[8].x * w_img), int(lm[8].y * h_img)
@@ -278,10 +314,15 @@ class InteractionApp:
                     cv2.putText(display_image, "ROTATION MODE", (50, 150), 0, 1, (255, 255, 0), 2)
                 elif is_pointer or is_ui_select:
                     left_interacting = True
-                    self.current_state = HandState.MENU_SELECTION
+                    self.left_state = HandState.MENU_SELECTION
                     
-                    # 기획서 명세에 따라 튀는 현상 방지를 위해 손바닥 무게중심(lx, ly)을 사용하여 마우스 이동
-                    self.mouse.move(lx, ly)
+                    # OS 마우스가 카메라(OpenCV 창) 내부에서만 움직이도록 제한
+                    try:
+                        rect = cv2.getWindowImageRect('3D Virtual Touch Painter')
+                        if rect[2] > 0 and rect[3] > 0:
+                            self.mouse.move_in_window(lx, ly, rect)
+                    except:
+                        pass
                     
                     if is_ui_select:
                         cv2.putText(display_image, "UI SELECT (CLICK)", (50, 150), 0, 1, (255, 0, 255), 2)
@@ -290,13 +331,13 @@ class InteractionApp:
                     else:
                         cv2.circle(display_image, (pointer_lx, pointer_ly), 6, (255, 0, 255), -1)
                 else:
-                    if self.current_state == HandState.MENU_SELECTION:
-                        self.current_state = HandState.IDLE
+                    if self.left_state == HandState.MENU_SELECTION:
+                        self.left_state = HandState.IDLE
                     self.prev_rot_pos, self.prev_zoom_y = None, None
             else:
                 # 왼손이 화면 밖으로 완전히 나갔을 때 상태 초기화
-                if self.current_state == HandState.MENU_SELECTION:
-                    self.current_state = HandState.IDLE
+                if self.left_state == HandState.MENU_SELECTION:
+                    self.left_state = HandState.IDLE
                 self.prev_rot_pos, self.prev_zoom_y = None, None
 
             # 2. 사용자 오른손 (그리기 전용)
@@ -316,15 +357,15 @@ class InteractionApp:
                     
                 hand_scale = calc_dist_rh(0, 5)
                 if hand_scale < 0.01: hand_scale = 0.01
-                # 드로잉 의도 임계값을 더욱 엄격하게 (0.35 -> 0.25) 수정하여 손을 굽히는 준비 자세 오입력 완벽 차단
-                pinch_th_rh = hand_scale * 0.25
-                release_th_rh = hand_scale * 0.35
+                # 드로잉 의도 임계값을 부드럽게 조정 (0.25 -> 0.30)
+                pinch_th_rh = hand_scale * 0.30
+                release_th_rh = hand_scale * 0.45
                 
                 # 포인터 시각화 (오른손 검지)
                 pointer_rx, pointer_ry = int(idx_pos[0] * w_img), int(idx_pos[1] * h_img)
                 
                 # 거리 및 상태에 따른 다이내믹 컬러/두께 적용
-                if self.current_state == HandState.DRAWING:
+                if self.right_state == HandState.DRAWING:
                     pointer_color = (0, 255, 0) # 드로잉 중 (초록색)
                     pointer_thickness = -1      # 꽉 찬 원
                 else:
@@ -335,7 +376,11 @@ class InteractionApp:
                 cv2.circle(display_image, (pointer_rx, pointer_ry), 6, pointer_color, pointer_thickness)
                 
                 z_val = np.clip((hand_scale - 0.05) / 0.2, 0, 1)
+                if self.is_2d_mode:
+                    z_val = 0.5  # 2D 모드일 때는 깊이를 화면 중앙(0.5)으로 완전 고정
                 raw_x, raw_y, raw_z = (idx_pos[0] + thumb_pos[0]) / 2, (idx_pos[1] + thumb_pos[1]) / 2, z_val
+                
+                self.current_cursor_3d = (raw_x, raw_y, raw_z)
 
                 # 주먹 상태 판별 (O자 모양 핀치를 방해하지 않으면서 느슨한 주먹만 차단하도록 1.1 -> 0.95로 조정)
                 idx_folded = calc_dist_rh(8, 0) < calc_dist_rh(5, 0) * 0.95
@@ -347,53 +392,48 @@ class InteractionApp:
                 pinky_folded = calc_dist_rh(20, 0) < calc_dist_rh(17, 0) * 1.1
                 other_fingers_folded = mid_folded and ring_folded and pinky_folded
 
-                # 드로잉 의도 판별: 확실한 핀치 + 손가락 화면 이탈 환각 방지 + 나머지 손가락은 주먹 쥔 상태여야 함
+                # 드로잉 의도 판별: 확실한 핀치 + 손가락 화면 이탈 환각 방지 + 나머지 손가락은 주먹 쥔 상태여야 함 (조건 완화: 다른 손가락 접힘 검사 제거)
                 is_idx_in_bounds_rh = all((0.02 < lm[i].x < 0.98) and (0.02 < lm[i].y < 0.98) for i in [5, 6, 7, 8])
-                is_pinch_intent = is_idx_in_bounds_rh and (dist_3d < pinch_th_rh) and (dist_3d < calc_dist_rh(8, 7) * 1.2) and not idx_folded and other_fingers_folded and not both_fists
+                is_pinch_intent = is_idx_in_bounds_rh and (dist_3d < pinch_th_rh) and (dist_3d < calc_dist_rh(8, 7) * 1.5) and not idx_folded and not both_fists
                 
-                # 드로잉 락 (Hysteresis): 너무 안 풀리는 현상 방지 (1.5 -> 1.2)
-                is_pinch = (dist_3d < release_th_rh * 1.2 and not idx_folded_lock and not both_fists) if self.current_state == HandState.DRAWING else is_pinch_intent
+                # 드로잉 락 (Hysteresis): 너무 안 풀리는 현상 방지
+                is_pinch = (dist_3d < release_th_rh * 1.2 and not idx_folded_lock and not both_fists) if self.right_state == HandState.DRAWING else is_pinch_intent
                 
-                # 오른손 마우스 포인팅 로직 (오른손 검지만 펴고 있을 때만 시스템 마우스 제어)
+                # 오른손 마우스 포인팅 로직 (카메라 창 내부에서만 제어)
                 idx_extended_rh = calc_dist_rh(8, 0) > calc_dist_rh(5, 0) * 1.3
                 if is_idx_in_bounds_rh and not left_interacting and not is_pinch and idx_extended_rh and other_fingers_folded:
-                    self.mouse.move(idx_pos[0], idx_pos[1])
+                    try:
+                        rect = cv2.getWindowImageRect('3D Virtual Touch Painter')
+                        if rect[2] > 0 and rect[3] > 0:
+                            self.mouse.move_in_window(idx_pos[0], idx_pos[1], rect)
+                    except:
+                        pass
                 
-                # --- [상태 전이 로직] ---
-                if left_interacting:
-                    # 왼손 동작 시 오른손은 IDLE 전환 (동시 입력 방지)
-                    if self.current_state == HandState.DRAWING and len(self.active_stroke) > 0:
-                        self.all_strokes.append(self.active_stroke)
-                        self.active_stroke = []
-                        self.undone_strokes.clear()
-                    # 만약 왼손이 UI SELECT 중이면 상태를 덮어쓰지 않고 유지
-                    if self.current_state != HandState.MENU_SELECTION:
-                        self.current_state = HandState.IDLE
-                else:
-                    if self.current_state == HandState.IDLE:
-                        if is_pinch:
-                            self.current_state = HandState.DRAWING
-                            self.pinch_lost_frames = 0
-                            self.draw_state_mean = np.array([raw_x, raw_y, raw_z, 0, 0, 0])
-                            self.draw_state_cov = np.eye(6)
-                            self.sx, self.sy, self.sz = raw_x, raw_y, raw_z
-                    elif self.current_state == HandState.DRAWING:
-                        if not is_pinch:
-                            self.pinch_lost_frames += 1
-                            if self.pinch_lost_frames > 3:
-                                if len(self.active_stroke) > 0:
-                                    self.all_strokes.append(self.active_stroke)
-                                    self.active_stroke = []
-                                    self.undone_strokes.clear()
-                                self.current_state = HandState.IDLE
-                        else:
-                            self.pinch_lost_frames = 0
+                # --- [상태 전이 로직 (양손 동시 상호작용 허용)] ---
+                if self.right_state == HandState.IDLE:
+                    if is_pinch:
+                        self.right_state = HandState.DRAWING
+                        self.pinch_lost_frames = 0
+                        self.draw_state_mean = np.array([raw_x, raw_y, raw_z, 0, 0, 0])
+                        self.draw_state_cov = np.eye(6)
+                        self.sx, self.sy, self.sz = raw_x, raw_y, raw_z
+                elif self.right_state == HandState.DRAWING:
+                    if not is_pinch:
+                        self.pinch_lost_frames += 1
+                        if self.pinch_lost_frames > 3:
+                            if len(self.active_stroke) > 0:
+                                self.all_strokes.append(self.active_stroke)
+                                self.active_stroke = []
+                                self.undone_strokes.clear()
+                            self.right_state = HandState.IDLE
+                    else:
+                        self.pinch_lost_frames = 0
 
                 # --- [상태별 동작 실행] ---
-                if self.current_state == HandState.IDLE:
+                if self.right_state == HandState.IDLE:
                     pass # 평소에는 빨간/노란 연결선(cv2.line)을 그리지 않음
                     
-                elif self.current_state == HandState.DRAWING:
+                elif self.right_state == HandState.DRAWING:
                     self.draw_state_mean, self.draw_state_cov = self.kf_draw.filter_update(
                         self.draw_state_mean, self.draw_state_cov, np.array([raw_x, raw_y, raw_z])
                     )
@@ -414,25 +454,32 @@ class InteractionApp:
 
             else:
                 self.right_hand_lost_frames += 1
-                if self.current_state == HandState.DRAWING and self.right_hand_lost_frames < 5:
+                if self.right_state == HandState.DRAWING and self.right_hand_lost_frames < 5:
                     pass # 빠른 이동으로 인한 일시적인 손실 시 드로잉 유지
                 else:
                     # 오른손이 화면 밖으로 완전히 나갔을 때 드로잉 상태 초기화
-                    if self.current_state == HandState.DRAWING:
+                    if self.right_state == HandState.DRAWING:
                         if len(self.active_stroke) > 0:
                             self.all_strokes.append(self.active_stroke)
                             self.active_stroke = []
                             self.undone_strokes.clear()
-                        self.current_state = HandState.IDLE
+                        self.right_state = HandState.IDLE
+                
+                self.current_cursor_3d = None
 
             self.draw_strokes_3d(display_image, w_img, h_img)
             self.render_minimaps(display_image, w_img, h_img)
+
+            if self.is_2d_mode:
+                cv2.putText(display_image, "VIEW LOCKED (Drawing on current plane)", (w_img // 2 - 250, 50), 0, 1, (0, 165, 255), 2)
 
             cv2.imshow('3D Virtual Touch Painter', display_image)
             
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q') or key == ord('Q'):
                 break
+            elif key == ord('p') or key == ord('P'):
+                self.is_2d_mode = not self.is_2d_mode
             elif key == ord('c') or key == ord('C'):
                 while self.all_strokes:
                     self.undone_strokes.append(self.all_strokes.pop())
@@ -475,6 +522,34 @@ class InteractionApp:
                 color = (int(255 * p2[2]), 100, int(255 * (1-p2[2])))
                 cv2.line(top_view, (int(p1[0]*m_size), int((1-p1[2])*m_size)), (int(p2[0]*m_size), int((1-p2[2])*m_size)), color, 2)
                 cv2.line(side_view, (int(p1[2]*m_size), int(p1[1]*m_size)), (int(p2[2]*m_size), int(p2[1]*m_size)), color, 2)
+        
+        # 현재 사용자의 손 위치(커서)를 미니맵에 표시
+        if self.current_cursor_3d is not None:
+            cx, cy, cz = self.current_cursor_3d
+            
+            # 화면(Screen) 좌표를 현재 카메라 뷰(Zoom, Rotation)를 반영하여 실제 3D 월드(World) 좌표로 변환
+            ix, iy, iz = (cx - 0.5)/self.view_zoom, (cy - 0.5)/self.view_zoom, (cz - 0.5)/self.view_zoom
+            ax, ay = -self.view_rot_x, -self.view_rot_y
+            iy_n = iy * np.cos(ax) - iz * np.sin(ax); iz_n = iy * np.sin(ax) + iz * np.cos(ax); iy, iz = iy_n, iz_n
+            ix_n = ix * np.cos(ay) - iz * np.sin(ay); iz_n = ix * np.sin(ay) + iz * np.cos(ay); ix, iz = ix_n, iz_n
+            
+            world_x, world_y, world_z = ix + 0.5, iy + 0.5, iz + 0.5
+            
+            # 깜빡임 효과 (애니메이션)
+            pulse = int(5 + 2 * np.sin(time.time() * 10))
+            
+            # TOP (X-Z) map: x는 X축, y는 Z축
+            top_px, top_py = int(world_x * m_size), int((1 - world_z) * m_size)
+            cv2.circle(top_view, (top_px, top_py), pulse, (0, 0, 255), -1)
+            cv2.circle(top_view, (top_px, top_py), pulse + 3, (0, 0, 255), 1)
+            cv2.putText(top_view, "YOU", (top_px + 10, top_py), 0, 0.4, (0, 0, 255), 1)
+            
+            # SIDE (Z-Y) map: x는 Z축, y는 Y축
+            side_px, side_py = int(world_z * m_size), int(world_y * m_size)
+            cv2.circle(side_view, (side_px, side_py), pulse, (0, 0, 255), -1)
+            cv2.circle(side_view, (side_px, side_py), pulse + 3, (0, 0, 255), 1)
+            cv2.putText(side_view, "YOU", (side_px + 10, side_py), 0, 0.4, (0, 0, 255), 1)
+            
         try:
             img[20:20+m_size, w-m_size-20 : w-20] = top_view
             img[40+m_size:40+2*m_size, w-m_size-20 : w-20] = side_view

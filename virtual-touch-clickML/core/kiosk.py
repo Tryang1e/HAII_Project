@@ -9,6 +9,7 @@ class KioskUI:
         self.exit_requested = False
         self.hovered_button = None
         self.last_internal_click_time = 0
+        self.pointer_pos = None  # 가상 포인터 위치
         
         self.buttons = [
             ("Exit", (100, 100, 255)),
@@ -49,6 +50,18 @@ class KioskUI:
     def set_hover(self, btn_name):
         self.hovered_button = btn_name
 
+    def update_pointer(self, x, y):
+        # 0~1로 정규화된 좌표를 Kiosk 해상도에 맞게 매핑
+        px = int(x * self.width)
+        py = int(y * self.height)
+        self.pointer_pos = (px, py)
+        
+        self.hovered_button = None
+        for name, (bx, by, bw, bh) in self.button_pos.items():
+            if bx <= px <= bx + bw and by <= py <= by + bh:
+                self.hovered_button = name
+                break
+
     def trigger_click(self, btn_name=None):
         import time
         current_time = time.time()
@@ -86,19 +99,19 @@ class KioskUI:
                     border_thickness = 2
                     edge_color = (50, 50, 50)
                 
+                
                 # 버튼 배경
                 cv2.rectangle(img, (bx, by), (bx + bw, by + bh), bg_color, -1)
                 # 버튼 테두리
                 cv2.rectangle(img, (bx, by), (bx + bw, by + bh), edge_color, border_thickness)
                 
-                # 가상의 마우스 커서/포인터 시각화
+                # 호버 텍스트
                 if is_hover:
-                    cx, cy = bx + bw // 2, by + bh // 2
-                    cv2.circle(img, (cx, cy), 20, (0, 0, 255), -1)
-                    cv2.putText(img, "HOVER & PINCH", (bx + 10, by + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                    cv2.putText(img, "HOVER", (bx + 10, by + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
-                
-                # 버튼 텍스트 중앙 정렬
+            # 버튼 텍스트를 버튼 위치에 맞게 다시 그림
+            if name in self.button_pos:
+                bx, by, bw, bh = self.button_pos[name]
                 font = cv2.FONT_HERSHEY_SIMPLEX
                 font_scale = 1.0
                 thickness = 2
@@ -106,5 +119,10 @@ class KioskUI:
                 tx = bx + (bw - text_size[0]) // 2
                 ty = by + (bh + text_size[1]) // 2
                 cv2.putText(img, name, (tx, ty), font, font_scale, (0, 0, 0), thickness)
+            
+        # 전역 가상 포인터 시각화
+        if self.pointer_pos is not None:
+            cv2.circle(img, self.pointer_pos, 15, (0, 0, 255), -1)
+            cv2.circle(img, self.pointer_pos, 20, (0, 255, 255), 2)
             
         cv2.imshow(self.window_name, img)
