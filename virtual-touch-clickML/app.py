@@ -93,7 +93,6 @@ class InteractionApp:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         svm_path = os.path.join(base_dir, 'virtual-touch-click', 'gesture_svm_model.xml')
         labels_path = os.path.join(base_dir, 'virtual-touch-click', 'gesture_labels.json')
-        
         self.svm = cv2.ml.SVM_load(svm_path)
         with open(labels_path, 'r') as f:
             label_map_str = json.load(f)
@@ -127,10 +126,10 @@ class InteractionApp:
             self.camera.stop()
             cv2.destroyAllWindows()
 
-    def run_loop(self):
-        while True:
+    def process_frame(self, draw_ui=False):
+        if True:
             frame = self.camera.get_frame()
-            if frame is None: continue
+            if frame is None: return None
             
             display_image = cv2.flip(frame, 1)
             h_img, w_img = display_image.shape[:2]
@@ -163,6 +162,12 @@ class InteractionApp:
                 is_right_fist = (calc_dist_r_early(8, 0) < calc_dist_r_early(5, 0) * 1.1) and (calc_dist_r_early(12, 0) < calc_dist_r_early(9, 0) * 1.1)
 
             both_fists = False
+
+            # 제스처 상태 변수 초기화 (손이 없을 때도 에러가 나지 않도록)
+            is_zoom = False
+            is_rotation = False
+            is_ui_select = False
+            is_pointer = False
 
             # 1. 사용자 왼손 (회전 및 줌)
             left_interacting = False
@@ -222,10 +227,6 @@ class InteractionApp:
                 is_mid_in_bounds = all((0.02 < lm[i].x < 0.98) and (0.02 < lm[i].y < 0.98) for i in [9, 10, 11, 12])
 
                 # --- [동작 상태 잠금 (Hysteresis Lock) 및 우선순위 결정] ---
-                is_zoom = False
-                is_rotation = False
-                is_ui_select = False
-                is_pointer = False
                 
                 # [상호 배타적 제스처 판별 로직]
                 # 각 기능이 겹치지 않도록 검지와 중지의 '펴짐(Extended)' 상태를 기준으로 역할을 완벽히 분리합니다.
@@ -316,20 +317,14 @@ class InteractionApp:
                     left_interacting = True
                     self.left_state = HandState.MENU_SELECTION
                     
-                    # OS 마우스가 카메라(OpenCV 창) 내부에서만 움직이도록 제한
-                    try:
-                        rect = cv2.getWindowImageRect('3D Virtual Touch Painter')
-                        if rect[2] > 0 and rect[3] > 0:
-                            self.mouse.move_in_window(lx, ly, rect)
-                    except:
-                        pass
+                    if is_pointer:
+                        self.mouse.move(lx, ly)
+                        cv2.circle(display_image, (pointer_lx, pointer_ly), 6, (255, 0, 255), -1)
                     
                     if is_ui_select:
                         cv2.putText(display_image, "UI SELECT (CLICK)", (50, 150), 0, 1, (255, 0, 255), 2)
                         cv2.circle(display_image, (pointer_lx, pointer_ly), 8, (0, 0, 255), -1) # 클릭 시 빨간색
                         self.mouse.click()
-                    else:
-                        cv2.circle(display_image, (pointer_lx, pointer_ly), 6, (255, 0, 255), -1)
                 else:
                     if self.left_state == HandState.MENU_SELECTION:
                         self.left_state = HandState.IDLE
@@ -401,13 +396,8 @@ class InteractionApp:
                 
                 # 오른손 마우스 포인팅 로직 (카메라 창 내부에서만 제어)
                 idx_extended_rh = calc_dist_rh(8, 0) > calc_dist_rh(5, 0) * 1.3
-                if is_idx_in_bounds_rh and not left_interacting and not is_pinch and idx_extended_rh and other_fingers_folded:
-                    try:
-                        rect = cv2.getWindowImageRect('3D Virtual Touch Painter')
-                        if rect[2] > 0 and rect[3] > 0:
-                            self.mouse.move_in_window(idx_pos[0], idx_pos[1], rect)
-                    except:
-                        pass
+                if is_idx_in_bounds_rh and not is_pinch and idx_extended_rh and other_fingers_folded:
+                    self.mouse.move(idx_pos[0], idx_pos[1])
                 
                 # --- [상태 전이 로직 (양손 동시 상호작용 허용)] ---
                 if self.right_state == HandState.IDLE:
@@ -468,28 +458,17 @@ class InteractionApp:
                 self.current_cursor_3d = None
 
             self.draw_strokes_3d(display_image, w_img, h_img)
-            self.render_minimaps(display_image, w_img, h_img)
-
-            if self.is_2d_mode:
-                cv2.putText(display_image, "VIEW LOCKED (Drawing on current plane)", (w_img // 2 - 250, 50), 0, 1, (0, 165, 255), 2)
-
-            cv2.imshow('3D Virtual Touch Painter', display_image)
+            self.render_minimaps(display_image, w_img, h_img, draw_ui)
             
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q') or key == ord('Q'):
-                break
-            elif key == ord('p') or key == ord('P'):
-                self.is_2d_mode = not self.is_2d_mode
-            elif key == ord('c') or key == ord('C'):
-                while self.all_strokes:
-                    self.undone_strokes.append(self.all_strokes.pop())
-                self.active_stroke.clear()
-            elif key == ord('u') or key == ord('U'):
-                if self.all_strokes:
-                    self.undone_strokes.append(self.all_strokes.pop())
-            elif key == ord('r') or key == ord('R'):
-                if self.undone_strokes:
-                    self.all_strokes.append(self.undone_strokes.pop())
+            # GUI 앱에서 상태를 읽어갈 수 있도록 인스턴스 변수에 저장
+            self.is_rotation = is_rotation
+            self.is_zoom = is_zoom
+            self.is_ui_select = is_ui_select
+            
+            if draw_ui:
+                self.draw_premium_ui(display_image, w_img, h_img, is_rotation, is_zoom, is_ui_select)
+            
+            return display_image
 
     def draw_strokes_3d(self, img, w, h):
         strokes_to_draw = self.all_strokes + ([self.active_stroke] if self.active_stroke else [])
@@ -510,7 +489,7 @@ class InteractionApp:
                 thickness = int(max(1, 2 + p2[2] * 12))
                 cv2.line(img, (int(p1[0]*w), int(p1[1]*h)), (int(p2[0]*w), int(p2[1]*h)), color, thickness)
 
-    def render_minimaps(self, img, w, h):
+    def render_minimaps(self, img, w, h, draw_ui=True):
         m_size = 250
         top_view = np.zeros((m_size, m_size, 3), dtype=np.uint8); side_view = np.zeros((m_size, m_size, 3), dtype=np.uint8)
         cv2.putText(top_view, "TOP (X-Z)", (10, 25), 0, 0.6, (255,255,255), 1); cv2.putText(side_view, "SIDE (Z-Y)", (10, 25), 0, 0.6, (255,255,255), 1)
@@ -550,7 +529,85 @@ class InteractionApp:
             cv2.circle(side_view, (side_px, side_py), pulse + 3, (0, 0, 255), 1)
             cv2.putText(side_view, "YOU", (side_px + 10, side_py), 0, 0.4, (0, 0, 255), 1)
             
-        try:
-            img[20:20+m_size, w-m_size-20 : w-20] = top_view
-            img[40+m_size:40+2*m_size, w-m_size-20 : w-20] = side_view
-        except: pass
+        self.top_view_img = top_view
+        self.side_view_img = side_view
+            
+        if draw_ui:
+            try:
+                img[20:20+m_size, w-m_size-20 : w-20] = top_view
+                img[40+m_size:40+2*m_size, w-m_size-20 : w-20] = side_view
+            except: pass
+
+    def draw_premium_ui(self, img, w, h, is_rotation, is_zoom, is_ui_select):
+        overlay = img.copy()
+        
+        # Colors (BGR)
+        bg_panel = (30, 30, 30)
+        border_color = (80, 80, 80)
+        text_primary = (245, 245, 245)
+        text_secondary = (180, 180, 180)
+        accent = (255, 160, 0) # Light blue/Cyan-ish or Orange. OpenCV is BGR. Let's use Cyan: (255, 200, 0)
+        accent = (255, 180, 50)
+        
+        # 1. Top Toolbar (Tools & Actions)
+        # Main Bar
+        cv2.rectangle(overlay, (w//2 - 250, 15), (w//2 + 250, 65), bg_panel, -1)
+        cv2.rectangle(overlay, (w//2 - 250, 15), (w//2 + 250, 65), border_color, 1)
+        
+        # 2. Left Sidebar (Modes)
+        cv2.rectangle(overlay, (15, 80), (160, 240), bg_panel, -1)
+        cv2.rectangle(overlay, (15, 80), (160, 240), border_color, 1)
+        
+        # 3. Status Board (Bottom)
+        cv2.rectangle(overlay, (w//2 - 150, h - 70), (w//2 + 150, h - 15), bg_panel, -1)
+        cv2.rectangle(overlay, (w//2 - 150, h - 70), (w//2 + 150, h - 15), border_color, 1)
+
+        # Alpha blending for glassmorphism
+        alpha = 0.8
+        cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
+        
+        # --- Draw Texts/Icons on `img` (Opaque) ---
+        
+        # Top Toolbar Texts
+        # Tools
+        cv2.putText(img, "BRUSH", (w//2 - 220, 45), cv2.FONT_HERSHEY_DUPLEX, 0.6, accent, 1)
+        cv2.putText(img, "ERASER", (w//2 - 130, 45), cv2.FONT_HERSHEY_DUPLEX, 0.6, text_secondary, 1)
+        
+        # Separator
+        cv2.line(img, (w//2 - 40, 25), (w//2 - 40, 55), border_color, 1)
+        
+        # Actions
+        cv2.putText(img, "UNDO (U)", (w//2 - 10, 43), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_primary, 1)
+        cv2.putText(img, "REDO (R)", (w//2 + 80, 43), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_primary, 1)
+        cv2.putText(img, "CLEAR (C)", (w//2 + 170, 43), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 255), 1)
+
+        # Left Sidebar Texts
+        cv2.putText(img, "VIEW MODE", (30, 110), cv2.FONT_HERSHEY_SIMPLEX, 0.5, text_secondary, 1)
+        if self.is_2d_mode:
+            cv2.putText(img, "2D Plane", (30, 140), cv2.FONT_HERSHEY_DUPLEX, 0.7, accent, 1)
+        else:
+            cv2.putText(img, "3D Space", (30, 140), cv2.FONT_HERSHEY_DUPLEX, 0.7, accent, 1)
+            
+        cv2.putText(img, "Press 'P'", (30, 165), cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_secondary, 1)
+        cv2.putText(img, "to toggle", (30, 185), cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_secondary, 1)
+
+        # Status Board Texts
+        status_text = "IDLE"
+        status_color = text_secondary
+        
+        if self.right_state == HandState.DRAWING:
+            status_text = "DRAWING"
+            status_color = (50, 255, 50) # Green
+        elif is_rotation:
+            status_text = "ROTATING"
+            status_color = (255, 255, 50) # Cyan
+        elif is_zoom:
+            status_text = "ZOOMING"
+            status_color = (50, 255, 255) # Yellow
+        elif is_ui_select:
+            status_text = "UI SELECT"
+            status_color = (255, 50, 255) # Magenta
+            
+        cv2.putText(img, "SYSTEM STATUS", (w//2 - 120, h - 45), cv2.FONT_HERSHEY_SIMPLEX, 0.4, text_secondary, 1)
+        cv2.putText(img, status_text, (w//2 - 120, h - 25), cv2.FONT_HERSHEY_DUPLEX, 0.7, status_color, 1)
+
